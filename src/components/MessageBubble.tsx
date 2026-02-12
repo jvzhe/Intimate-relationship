@@ -14,8 +14,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ role, content }) =
     <div className={cn("flex w-full mb-4", isUser ? "justify-end" : "justify-start")}>
       {!isUser && (
         <div className="flex-shrink-0 mr-2">
-          <div className="w-10 h-10 bg-white rounded-md flex items-center justify-center border border-gray-200">
-             <Bot className="w-6 h-6 text-gray-600" />
+          <div className="w-10 h-10 rounded-md overflow-hidden border border-gray-200">
+             <img src="/ferryman.jpg" alt="情感摆渡人" className="w-full h-full object-cover" />
           </div>
         </div>
       )}
