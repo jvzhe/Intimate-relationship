@@ -15,8 +15,17 @@ export const WeChatInterface = () => {
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isComposing, setIsComposing] = useState(false); // Track CJK composition state
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [inputValue]);
 
   // Load messages from LocalStorage on mount
   useEffect(() => {
@@ -175,7 +184,8 @@ export const WeChatInterface = () => {
           
           <div className="flex-1 bg-white rounded-md min-h-[40px] px-3 py-2 mb-1">
              <textarea 
-                className="w-full h-full bg-transparent outline-none resize-none text-base max-h-24"
+                ref={textareaRef}
+                className="w-full bg-transparent outline-none resize-none text-base max-h-24 block"
                 rows={1}
                 placeholder=""
                 value={inputValue}
