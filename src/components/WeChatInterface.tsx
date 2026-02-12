@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, Message } from '@/lib/db';
+import { db, Message, Memory } from '@/lib/db';
 import { MessageBubble } from './MessageBubble';
 import { ChevronLeft, MoreHorizontal, Mic, Plus, Smile, Keyboard, X, Check } from 'lucide-react';
 
