@@ -14,6 +14,8 @@ export const WeChatInterface = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isComposing, setIsComposing] = useState(false); // Track CJK composition state
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load messages from LocalStorage on mount
@@ -120,10 +122,21 @@ export const WeChatInterface = () => {
     } catch (error) {
       console.error('Failed to get AI response:', error);
       setIsTyping(false);
+      
+      let friendlyError = `连接 AI 失败: ${error instanceof Error ? error.message : String(error)}`;
+      const errorStr = String(error);
+      
+      // Handle common Serveo/Tunnel interception errors (returning HTML instead of JSON)
+      if (errorStr.includes('Unexpected token') || errorStr.includes('JSON')) {
+        friendlyError = '连接被安全页面拦截，请尝试刷新页面，或者检查是否需要点击“继续访问”。';
+      } else if (errorStr.includes('Failed to fetch') || errorStr.includes('NetworkError')) {
+        friendlyError = '网络连接不通，请检查电脑网络（某些网络可能屏蔽了此链接）。';
+      }
+
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: '（系统消息）连接 AI 失败，请检查网络或配置。',
+        content: `（系统消息）${friendlyError}`,
       };
       setMessages(prev => [...prev, errorMsg]);
     }
@@ -154,9 +167,9 @@ export const WeChatInterface = () => {
       </div>
 
       {/* Input Area */}
-      <footer className="bg-[#f7f7f7] border-t border-gray-300 px-3 py-2 shrink-0">
-        <div className="flex items-end space-x-3">
-          <button className="p-2 mb-1 rounded-full hover:bg-gray-200 transition-colors">
+      <footer className="bg-[#f7f7f7] border-t border-gray-300 px-3 py-2 shrink-0 pb-[env(safe-area-inset-bottom)]">
+        <div className="flex items-end space-x-3 mb-[env(safe-area-inset-bottom)]">
+          <button className="p-2 mb-1 rounded-full hover:bg-gray-200 transition-colors shrink-0">
             <Mic className="w-7 h-7 text-gray-700" />
           </button>
           
@@ -167,8 +180,14 @@ export const WeChatInterface = () => {
                 placeholder=""
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
+                onCompositionStart={() => setIsComposing(true)}
+                onCompositionEnd={(e) => {
+                  setIsComposing(false);
+                  // Force update value on composition end for some mobile browsers
+                  setInputValue(e.currentTarget.value);
+                }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
+                  if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
                     e.preventDefault();
                     handleSendMessage();
                   }
@@ -176,19 +195,19 @@ export const WeChatInterface = () => {
              />
           </div>
 
-          <button className="p-2 mb-1 rounded-full hover:bg-gray-200 transition-colors">
+          <button className="p-2 mb-1 rounded-full hover:bg-gray-200 transition-colors shrink-0">
             <Smile className="w-7 h-7 text-gray-700" />
           </button>
           
-          {inputValue.trim() ? (
+          {inputValue.trim() || isComposing ? (
             <button 
               onClick={handleSendMessage}
-              className="px-4 py-1.5 mb-1.5 bg-[#07c160] text-white text-sm font-medium rounded-md hover:bg-[#06ad56] transition-colors"
+              className="px-4 py-1.5 mb-1.5 bg-[#07c160] text-white text-sm font-medium rounded-md hover:bg-[#06ad56] transition-colors shrink-0"
             >
               发送
             </button>
           ) : (
-             <button className="p-2 mb-1 rounded-full hover:bg-gray-200 transition-colors">
+             <button className="p-2 mb-1 rounded-full hover:bg-gray-200 transition-colors shrink-0">
               <Plus className="w-7 h-7 text-gray-700" />
             </button>
           )}
