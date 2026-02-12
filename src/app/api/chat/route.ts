@@ -3,8 +3,14 @@ import { SYSTEM_PROMPT } from '@/lib/prompt';
 
 export async function POST(req: Request) {
   try {
-    const { messages } = await req.json();
+    const { messages, memoryContext } = await req.json();
     const apiKey = process.env.DOUBAO_API_KEY || process.env.ARK_API_KEY;
+
+    // Construct Enhanced System Prompt with Memory
+    let finalSystemPrompt = SYSTEM_PROMPT;
+    if (memoryContext) {
+      finalSystemPrompt += `\n\n【长期记忆档案】\n${memoryContext}\n\n请在回答中自然地利用上述记忆，体现出你记得用户的情况。`;
+    }
 
     // Mock Response if no API Key
     if (!apiKey) {
@@ -22,9 +28,10 @@ export async function POST(req: Request) {
     const apiUrl = process.env.DOUBAO_API_URL || 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
     
     // Context Optimization: Sliding Window
-    // Only keep the last 20 messages to prevent token explosion and stay within model limits (4k/32k).
-    // The System Prompt is always added at the beginning.
-    const recentMessages = messages.slice(-20);
+    // Fixed at 50 messages to align with the 50-message long-term memory update cycle.
+    // This ensures no memory gaps: Long-term memory covers everything before the last 50,
+    // and this window covers the immediate last 50.
+    const recentMessages = messages.slice(-50);
 
     const response = await fetch(apiUrl, {
       method: 'POST',
@@ -37,9 +44,14 @@ export async function POST(req: Request) {
         messages: [
           {
             role: 'system',
-            content: SYSTEM_PROMPT
+            content: finalSystemPrompt
           },
-          ...recentMessages
+          ...recentMessages,
+          // Reinforcement to prevent persona drift due to history
+          {
+            role: 'system',
+            content: '【System Instruction】: Ignore the tone/style of previous AI responses in the history if they conflict with the current "Role" and "Tone" defined in the system prompt. Strictly adhere to the current persona.'
+          }
         ],
         stream: false, // Phase 1: No streaming for simplicity
       }),

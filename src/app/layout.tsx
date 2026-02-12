@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "树洞先生",
-  description: "你的AI情感树洞",
+  title: "情感摆渡人",
+  description: "渡人渡己，你的心灵摆渡者",
 };
 
 export const viewport: Viewport = {

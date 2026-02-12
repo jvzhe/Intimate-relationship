@@ -1,17 +1,13 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db, Message } from '@/lib/db';
 import { MessageBubble } from './MessageBubble';
 import { ChevronLeft, MoreHorizontal, Mic, Plus, Smile, Keyboard, X, Check } from 'lucide-react';
 
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-}
-
 export const WeChatInterface = () => {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const messages = useLiveQuery(() => db.messages.orderBy('createdAt').toArray()) || [];
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isComposing, setIsComposing] = useState(false); // Track CJK composition state
@@ -32,24 +28,103 @@ export const WeChatInterface = () => {
     }
   }, [inputValue]);
 
-  // Load messages from LocalStorage on mount
+  // Initialize DB and migrate from LocalStorage if needed
   useEffect(() => {
-    const savedMessages = localStorage.getItem('chat_history');
-    if (savedMessages) {
-      setMessages(JSON.parse(savedMessages));
-    } else {
-      setMessages([
-        { id: '1', role: 'assistant', content: '你好，我是树洞先生。如果你有情感上的困惑，或者想聊聊亲密关系中的那些事，我都在这里。' }
-      ]);
-    }
+    const initDb = async () => {
+      const count = await db.messages.count();
+      if (count === 0) {
+        // Try migration from LocalStorage
+        const savedMessages = localStorage.getItem('chat_history');
+        if (savedMessages) {
+          try {
+            const parsed = JSON.parse(savedMessages);
+            // Add createdAt if missing
+            const messagesToImport = parsed.map((m: any, i: number) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              createdAt: Date.now() - (parsed.length - i) * 1000 // Approximate timestamp
+            }));
+            await db.messages.bulkAdd(messagesToImport);
+          } catch (e) {
+            console.error('Migration failed:', e);
+          }
+        } else {
+          // Default welcome message
+          await db.messages.add({
+            id: '1',
+            role: 'assistant',
+            content: '你好，我是情感摆渡人。世间悲喜皆有渡口，如果你在关系中迷失了方向，不妨坐下来聊聊。',
+            createdAt: Date.now()
+          });
+        }
+      }
+    };
+    initDb();
   }, []);
 
-  // Save messages to LocalStorage whenever they change
+  // Phase 3: Intelligent Summarization Trigger (Rolling Update)
   useEffect(() => {
-    if (messages.length > 0) {
-      localStorage.setItem('chat_history', JSON.stringify(messages));
-    }
-  }, [messages]);
+    const checkAndSummarize = async () => {
+      // Trigger every 50 messages to match the short-term context window
+      if (messages.length > 0 && messages.length % 50 === 0) {
+        console.log('Triggering rolling summarization...');
+        
+        // Use the last 50 messages for the summary update
+        const recentMessages = messages.slice(-50);
+        
+        // 1. Get the latest existing memory (if any)
+        const latestMemories = await db.memories.orderBy('createdAt').reverse().limit(1).toArray();
+        const oldMemory = latestMemories.length > 0 ? latestMemories[0].content : '';
+
+        // Prepare messages with timestamps for the summary
+        const messagesWithTime = recentMessages.map(m => {
+          const date = new Date(m.createdAt);
+          const timeStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
+          return {
+            role: m.role,
+            content: `[${timeStr}] ${m.content}`
+          };
+        });
+
+        try {
+          const response = await fetch('/api/summarize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              messages: messagesWithTime,
+              oldMemory: oldMemory // Pass old memory for merging
+            }),
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            if (data.summary) {
+              // 2. Save the new consolidated memory
+              await db.memories.add({
+                content: data.summary,
+                type: 'summary', // Consolidated summary
+                createdAt: Date.now()
+              });
+
+              // Limit memory growth (keep last 10)
+              const MAX_MEMORIES = 10;
+              const allKeys = await db.memories.orderBy('createdAt').primaryKeys();
+              if (allKeys.length > MAX_MEMORIES) {
+                await db.memories.bulkDelete(allKeys.slice(0, allKeys.length - MAX_MEMORIES));
+              }
+
+              console.log('Memory rolled over successfully');
+            }
+          }
+        } catch (error) {
+          console.error('Summarization failed:', error);
+        }
+      }
+    };
+    
+    checkAndSummarize();
+  }, [messages.length]);
 
   // Initialize Speech Recognition
   useEffect(() => {
@@ -123,7 +198,7 @@ export const WeChatInterface = () => {
     setRecordingText('');
   };
 
-  const sendVoiceMessage = () => {
+  const sendVoiceMessage = async () => {
     if (!recordingText.trim()) {
       cancelVoice();
       return;
@@ -133,8 +208,9 @@ export const WeChatInterface = () => {
       id: Date.now().toString(),
       role: 'user',
       content: recordingText,
+      createdAt: Date.now(),
     };
-    setMessages(prev => [...prev, newMessage]);
+    db.messages.add(newMessage);
     
     // Reset states
     setIsReviewing(false);
@@ -143,11 +219,23 @@ export const WeChatInterface = () => {
     // Trigger AI response logic manually
     setIsTyping(true);
     
+    // Get Long-Term Memory (Rolling Update: Only need the single latest consolidated memory)
+    const latestMemory = await db.memories.orderBy('createdAt').reverse().limit(1).toArray();
+    const memoryContext = latestMemory.length > 0 ? latestMemory[0].content : '';
+
     fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: [...messages, newMessage].map(m => ({ role: m.role, content: m.content }))
+        messages: [...messages, newMessage].map(m => {
+          const date = new Date(m.createdAt);
+          const timeStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
+          return {
+            role: m.role,
+            content: `[${timeStr}] ${m.content}`
+          };
+        }),
+        memoryContext: memoryContext // Pass memory to API
       }),
     })
     .then(async (response) => {
@@ -173,8 +261,9 @@ export const WeChatInterface = () => {
             id: (Date.now() + index).toString(),
             role: 'assistant',
             content: part,
+            createdAt: Date.now() + index,
           };
-          setMessages(prev => [...prev, aiReply]);
+          db.messages.add(aiReply);
           if (index === parts.length - 1) setIsTyping(false);
         }, currentDelay);
       });
@@ -186,8 +275,9 @@ export const WeChatInterface = () => {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
         content: `（系统消息）连接 AI 失败: ${String(error)}`,
+        createdAt: Date.now() + 1,
       };
-      setMessages(prev => [...prev, errorMsg]);
+      db.messages.add(errorMsg);
     });
   };
 
@@ -206,19 +296,35 @@ export const WeChatInterface = () => {
       id: Date.now().toString(),
       role: 'user',
       content: inputValue,
+      createdAt: Date.now(),
     };
 
-    setMessages(prev => [...prev, newMessage]);
+    db.messages.add(newMessage);
     setInputValue('');
     setIsTyping(true); // Show "typing" indicator
     
+    // Get Long-Term Memory (Rolling Update: Only need the single latest consolidated memory)
+    const latestMemory = await db.memories.orderBy('createdAt').reverse().limit(1).toArray();
+    const memoryContext = latestMemory.length > 0 ? latestMemory[0].content : '';
+
     // Call API
     try {
+      // Prepare messages with timestamps for time-awareness
+      const contextMessages = [...messages, newMessage].map(m => {
+        const date = new Date(m.createdAt);
+        const timeStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
+        return {
+          role: m.role,
+          content: `[${timeStr}] ${m.content}`
+        };
+      });
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: [...messages, newMessage].map(m => ({ role: m.role, content: m.content }))
+          messages: contextMessages,
+          memoryContext: memoryContext // Pass memory to API
         }),
       });
 
@@ -263,8 +369,9 @@ export const WeChatInterface = () => {
             id: (Date.now() + index).toString(),
             role: 'assistant',
             content: part, // Emojis like [EMOJI:hug] will be rendered as text for now
+            createdAt: Date.now() + index,
           };
-          setMessages(prev => [...prev, aiReply]);
+          db.messages.add(aiReply);
           
           // Only stop typing indicator after the LAST message appears
           if (index === parts.length - 1) {
@@ -291,26 +398,174 @@ export const WeChatInterface = () => {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
         content: `（系统消息）${friendlyError}`,
+        createdAt: Date.now() + 1,
       };
-      setMessages(prev => [...prev, errorMsg]);
+      db.messages.add(errorMsg);
+    }
+  };
+
+  const [showMemory, setShowMemory] = useState(false);
+  const [memoryList, setMemoryList] = useState<Memory[]>([]);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+
+  // Debug trigger refs
+  const lastClickRef = useRef(0);
+  const clickCountRef = useRef(0);
+
+  const handleOpenMemory = async () => {
+    const allMemories = await db.memories.orderBy('createdAt').reverse().toArray();
+    setMemoryList(allMemories);
+    setShowMemory(true);
+  };
+
+  const handleTitleClick = () => {
+    const now = Date.now();
+    // Reset if click gap is too long (e.g., > 500ms)
+    if (now - lastClickRef.current > 500) {
+      clickCountRef.current = 0;
+    }
+    
+    clickCountRef.current += 1;
+    lastClickRef.current = now;
+
+    if (clickCountRef.current >= 5) {
+      handleOpenMemory();
+      clickCountRef.current = 0;
+    }
+  };
+
+  const handleManualSummarize = async () => {
+    setIsSummarizing(true);
+    try {
+      // Get recent messages (Increased limit to 500 to cover more history for manual trigger)
+      const recentMessages = await db.messages.orderBy('createdAt').reverse().limit(500).toArray();
+      const chronMessages = recentMessages.reverse();
+
+      // Get latest memory for rolling update
+      const latestMemories = await db.memories.orderBy('createdAt').reverse().limit(1).toArray();
+      const oldMemory = latestMemories.length > 0 ? latestMemories[0].content : '';
+      
+      // Prepare messages with timestamps
+      const messagesWithTime = chronMessages.map(m => {
+        const date = new Date(m.createdAt);
+        const timeStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
+        return {
+          role: m.role,
+          content: `[${timeStr}] ${m.content}`
+        };
+      });
+
+      const response = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          messages: messagesWithTime,
+          oldMemory: oldMemory
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.summary) {
+          await db.memories.add({
+            content: data.summary,
+            type: 'summary',
+            createdAt: Date.now()
+          });
+
+          // Limit memory growth (keep last 10)
+          const MAX_MEMORIES = 10;
+          const allKeys = await db.memories.orderBy('createdAt').primaryKeys();
+          if (allKeys.length > MAX_MEMORIES) {
+            await db.memories.bulkDelete(allKeys.slice(0, allKeys.length - MAX_MEMORIES));
+          }
+
+          // Refresh list
+          const allMemories = await db.memories.orderBy('createdAt').reverse().toArray();
+          setMemoryList(allMemories);
+        }
+      }
+    } catch (error) {
+      console.error('Manual summarization failed:', error);
+    } finally {
+      setIsSummarizing(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#ededed] max-w-md mx-auto shadow-xl overflow-hidden">
+    <div className="flex flex-col h-screen bg-[#ededed] max-w-md mx-auto shadow-xl overflow-hidden relative">
       {/* Header */}
-      <header className="flex items-center justify-between px-4 h-12 bg-[#ededed] border-b border-gray-300 z-10 shrink-0">
+      <header className="flex items-center justify-between px-4 h-12 bg-[#ededed] border-b border-gray-300 z-10 shrink-0 select-none">
         <div className="flex items-center text-black cursor-pointer">
-          <ChevronLeft className="w-6 h-6" />
-          <span className="text-base font-medium ml-1">微信({messages.length > 0 ? messages.length : 1})</span>
+          <ChevronLeft className="w-6 h-6 -ml-2" />
+          <span className="text-base font-medium">微信({messages.length > 0 ? messages.length : 1})</span>
         </div>
-        <div className="text-base font-semibold text-black">
-            {isTyping ? '对方正在输入...' : '树洞先生'}
+        <div 
+          className="text-base font-semibold text-black cursor-pointer active:opacity-70 transition-opacity"
+          onClick={handleTitleClick}
+        >
+            {isTyping ? '对方正在输入...' : '情感摆渡人'}
         </div>
         <div className="flex items-center text-black cursor-pointer">
           <MoreHorizontal className="w-6 h-6" />
         </div>
       </header>
+
+      {/* Memory Viewer Modal */}
+      {showMemory && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-white w-full max-w-sm rounded-xl shadow-2xl flex flex-col max-h-[80vh] animate-in zoom-in-95 duration-200">
+            <div className="p-4 border-b flex justify-between items-center bg-gray-50 rounded-t-xl">
+              <h3 className="font-semibold text-lg text-gray-800">🧠 长期记忆库</h3>
+              <button onClick={() => setShowMemory(false)} className="p-1 hover:bg-gray-200 rounded-full">
+                <X className="w-6 h-6 text-gray-500" />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 space-y-4 bg-gray-50/50 flex-1">
+              {memoryList.length === 0 ? (
+                <div className="text-center text-gray-400 py-10">
+                  <p>📭 还没有生成长期记忆</p>
+                  <p className="text-xs mt-2">（每聊 50 句会自动总结一次）</p>
+                </div>
+              ) : (
+                // Only show the LATEST memory to avoid confusion, as it contains the consolidated history
+                memoryList.slice(0, 1).map((m) => (
+                  <div key={m.id} className="bg-white p-3 rounded-lg shadow-sm border-l-4 border-[#07c160] text-sm">
+                    <div className="flex justify-between text-xs text-gray-500 mb-2">
+                      <span className="font-bold text-[#07c160] flex items-center">
+                        <span className="mr-1">🧠</span> 当前生效记忆
+                      </span>
+                      <span>{new Date(m.createdAt).toLocaleString()}</span>
+                    </div>
+                    <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">{m.content}</p>
+                  </div>
+                ))
+              )}
+            </div>
+            
+            {/* Manual Summarize Button Footer */}
+            <div className="p-4 border-t bg-white rounded-b-xl">
+               <button 
+                 onClick={handleManualSummarize}
+                 disabled={isSummarizing}
+                 className="w-full py-2.5 bg-[#07c160] hover:bg-[#06ad56] active:bg-[#059b4c] text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
+               >
+                 {isSummarizing ? (
+                   <>
+                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                     <span>正在总结中...</span>
+                   </>
+                 ) : (
+                   <>
+                     <span className="text-lg">⚡</span>
+                     <span>立即总结 (基于最近500条对话)</span>
+                   </>
+                 )}
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Chat Area */}
       <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
@@ -414,9 +669,16 @@ export const WeChatInterface = () => {
                     setInputValue(e.currentTarget.value);
                   }}
                   onKeyDown={(e) => {
+                    // Use User Agent to detect real mobile devices
+                    // This allows "Enter to Send" on desktop even if the window is narrow (like in Trae/VSCode preview)
+                    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                    
                     if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
-                      e.preventDefault();
-                      handleSendMessage();
+                      if (!isMobileDevice) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                      // If real mobile, do nothing (allow default newline)
                     }
                   }}
                />
